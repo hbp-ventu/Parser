@@ -17,6 +17,7 @@ $p = new Parser('lookup_variable_fn');
 $p->registerConstant('randmax', 10);
 $p->enableMathsFunctions();
 $p->enableTimeFunctions();
+$p->enableMiscFunctions();
 $p->enableStringFunctions();
 
 
@@ -81,7 +82,9 @@ $test = [
     'this.myfn(10)' => 'input was 10',
     'getthis()' => 'object',
     'getthis().mynumber' => 44,
-    'getthis().myfn' => 'function'
+    'getthis().myfn' => 'function',
+    'caseof(3,"11","22","33","44")' => '33',
+    '(5*11)<(4*16)' => 1
 ];
 
 echo "<table>\n";

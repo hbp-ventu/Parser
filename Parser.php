@@ -69,7 +69,7 @@ class Parser {
     /**
      * Register an object
      * @param string $objname Name of the object
-     * @param object $obj Must provide gv() and getType(), or $properties[]
+     * @param object $obj Must provide gv() or $properties[]
      * @return bool
      */
     public function registerObject($objname, $obj) {
@@ -112,7 +112,7 @@ class Parser {
         $this->index = 0;
         $this->errno = 0;
         
-        $res = $this->exprPLUSMINUS();
+        $res = $this->expr();
         if ($res === null) {
             $this->err(6, "Failed to parse the expression");
             return (object)[ 'type' => 'error', 'value' => $this->errno, 'name' => $this->errtxt ];
@@ -178,7 +178,11 @@ class Parser {
         $this->registerFunction('dateadjust', 'Parser::timefns', 2, 2);
         $this->registerFunction('timeadjust', 'Parser::timefns', 2, 2);
     }
-
+    
+    public function enableMiscFunctions() {
+        $this->registerFunction('caseof', 'Parser::miscfns', 2, 100);
+    }
+    
     public function enableStringFunctions() {
         foreach (['tolower','toupper','strlen'] as $fn)
             $this->registerFunction($fn, 'Parser::stringfns', 1, 1);
@@ -292,7 +296,6 @@ class Parser {
 
         $ts = strtotime($date);
         foreach (explode(' ', $actions) as $action) {
-            echo "AC $action ";
             $wd = array_search(substr($action, -3), $weekdays);
             $m = array_search(substr($action, -3), $months);
             $u = array_search(substr($action, -2), $units);
@@ -414,6 +417,18 @@ class Parser {
         }
         return null;
     }
+
+    private static function miscfns($fn, $argv) {
+        switch ($fn) {
+            case 'caseof': // value = caseof(<input>,<option1>[,<option2]...)
+                $in = $this->toInt($argv[0]);
+                $out = (object)[ 'type' => 'string', 'value' => '' ]; // return empty string if there is no match
+                if ($in >= 1 && $in < count($argv))   $out = $argv[$in];
+                return $out;
+        }
+        return null;
+    }
+    
     
     /**
      * Handler for a bunch of maths functions
@@ -583,10 +598,67 @@ class Parser {
             case '%':
                 $l %= $r;
                 break;
+            case '==':
+                $l = (round($l,10) == round($r,10)) ? 1:0;
+                break;
+            case '!=':
+                $l = (round($l,10) != round($r,10)) ? 1:0;
+                break;
+            case '>=':
+                $l = ($l >= $r) ? 1:0;
+                break;
+            case '<=':
+                $l = ($l <= $r) ? 1:0;
+                break;
+            case '>':
+                $l = ($l > $r) ? 1:0;
+                break;
+            case '<':
+                $l = ($l < $r) ? 1:0;
+                break;
         }
         return $this->fromFloat($l);
     }
     
+    private function expr() {
+        return $this->exprCOMPARISON();
+    }
+              
+    /**
+     * Check for comparison expression:  <expression> "==" <expression>
+     * @return mixed
+     */
+    private function exprCOMPARISON() {
+        $leftval = $this->exprPLUSMINUS();
+        if ($leftval === null)   return null;
+
+        $cmps = [ '==','!=','<','<=','>','>=' ];
+
+        while (true) {
+            if ($this->dbg)   echo "COMPARISON<br>";
+            $backtrace = $this->index;
+            
+            $res = false;
+            $rightval = '';
+            // look for 1-char or 2-chars comparison operator
+            $op1 = substr($this->input, $this->index++, 1);
+            $op = $op1.substr($this->input, $this->index++, 1);
+            if (!in_array($op, $cmps)) {  $op = $op1;  $this->index--;  }
+
+            if ($op && in_array($op, $cmps) && ($rightval = $this->exprPLUSMINUS()) !== null) {
+                $leftval = $this->binOp($leftval, $op, $rightval);
+                if ($leftval === null)   return null;
+                $res = true;
+            } else if ($this->dbg)   echo "comparison fail<br>";
+            
+            if (!$res) {
+                $this->index = $backtrace;
+                return $leftval;
+            }
+        }
+        return null;
+    }
+
     /**
      * Check for +- expression:  <expression> "+" <expression>
      * @return mixed
@@ -772,16 +844,9 @@ class Parser {
             return null;
         }
 
-        // if there is no properties[] array then use gv() and getType()
-        if (!is_object($obj->value) || 
-            !method_exists($obj->value, 'getType') ||
-            !method_exists($obj->value, 'gv'))   return $this->err(9, "Invalid object");
-        
-        $proptype = $obj->value->getType($prop);
-        if (!$proptype) {
-            $this->index = $backtrace;
-            return null;
-        }
+        // if there is no properties[] array then use gv()
+        if (!is_object($obj->value) || !method_exists($obj->value, 'gv'))
+            return $this->err(9, "Invalid object");
 
         $propval = $obj->value->gv($prop, false);
         if ($propval === null)    return null;
@@ -848,7 +913,7 @@ class Parser {
      */
     private function factor_expr() {
         $val = null;
-        return ($this->char('(') && ($val = $this->exprPLUSMINUS()) !== null && $this->char(')')) ? $val : null;
+        return ($this->char('(') && ($val = $this->expr()) !== null && $this->char(')')) ? $val : null;
     }
     
     /**
@@ -892,7 +957,7 @@ class Parser {
                 return $argv;
             }
             // parse an argument
-            $arg = $this->exprPLUSMINUS();
+            $arg = $this->expr();
             if ($arg === null)
                 return null;
             $argv[] = $arg;
