@@ -164,8 +164,9 @@ class Parser {
             $this->registerFunction($fn, 'Parser::mathsfns', 1, 1);
         $this->registerFunction('pow', 'Parser::mathsfns', 2, 2);
         $this->registerFunction('random', 'Parser::mathsfns', 0, 2);
-        $this->registerFunction('min', 'Parser::mathsfns', 2, 100);
-        $this->registerFunction('max', 'Parser::mathsfns', 2, 100);
+        $this->registerFunction('min', 'Parser::mathsfns', 1, 100);
+        $this->registerFunction('max', 'Parser::mathsfns', 1, 100);
+        $this->registerFunction('sum', 'Parser::mathsfns', 1, 100);
         
         $this->constants['PI'] = (object)[ 'type' => 'number', 'value' => 3.141592653589793 ];
         $this->constants['e'] = (object)[ 'type' => 'number', 'value' => 2.718281828459045 ];
@@ -181,14 +182,18 @@ class Parser {
     
     public function enableMiscFunctions() {
         $this->registerFunction('caseof', 'Parser::miscfns', 2, 100);
+        $this->registerFunction('pie', 'Parser::miscfns', 1, 100);
+        $this->registerFunction('bar', 'Parser::miscfns', 1, 100);
     }
     
     public function enableStringFunctions() {
-        foreach (['tolower','toupper','strlen'] as $fn)
+        foreach (['tolower','toupper','length'] as $fn)
             $this->registerFunction($fn, 'Parser::stringfns', 1, 1);
         $this->registerFunction('replace', 'Parser::stringfns', 3, 3);
         $this->registerFunction('substr', 'Parser::stringfns', 2, 3);
         $this->registerFunction('sprintf', 'Parser::stringfns', 1, 100);
+        $this->registerFunction('explode', 'Parser::stringfns', 2, 2);
+        $this->registerFunction('implode', 'Parser::stringfns', 2, 2);
     }
 
     /**
@@ -390,21 +395,39 @@ class Parser {
      * Handler for a bunch of string functions
      */
     private static function stringfns($fn, $argv) {
-        $arg = $this->toString($argv[0]);
-        if ($arg === null)    return null;
         switch ($fn) {
-            case 'strlen': // number = strlen(<string>)
-                return (object)[ 'type' => 'number', 'value' => strlen($arg) ];
+            case 'implode': // string = implode(<string>,<array>)
+                if ($argv[0]->type != 'string' || $argv[1]->type != 'array')   return null;
+                $parts = [];
+                $ar = $argv[1]->value;
+                for ($i = 0; $i < count($ar); $i++)   $parts[] = $this->toString($ar[$i]);
+                return (object)[ 'type' => 'string', 'value' => implode($this->toString($argv[0]), $parts) ];
+            case 'explode': // array = explode(<string>,<string>)
+                if ($argv[0]->type != 'string' || $argv[1]->type != 'string')   return null;
+                $parts = explode($this->toString($argv[0]), $this->toString($argv[1]));
+                $res = [ 'type' => 'array', 'value' => [] ];
+                for ($i = 0; $i < count($parts); $i++)   $res['value'][] = (object)[ 'type' => 'string', 'value' => $parts[$i] ];
+                return (object)$res;
+            case 'length': // number = length(<string>), number = length(<array>)
+                if ($argv[0]->type == 'array')
+                    return (object)[ 'type' => 'number', 'value' => count($argv[0]->value) ];
+                $arg = $this->toString($argv[0]);
+                if ($arg === null)    return null;
+                return (object)[ 'type' => 'number', 'value' => mb_strlen($arg) ];
             case 'tolower': // string = tolower(<string>)
-                return (object)[ 'type' => 'string', 'value' => strtolower($arg) ];
+                $arg = $this->toString($argv[0]);
+                if ($arg === null)    return null;
+                return (object)[ 'type' => 'string', 'value' => mb_strtolower($arg) ];
             case 'toupper': // string = toupper(<string>)
-                return (object)[ 'type' => 'string', 'value' => strtoupper($arg) ];
+                $arg = $this->toString($argv[0]);
+                if ($arg === null)    return null;
+                return (object)[ 'type' => 'string', 'value' => mb_strtoupper($arg) ];
             case 'substr': // string = substr(<string>,<int>), string = substr(<string>,<int>,<int>)
                 $offset = $this->toInt($argv[1]);
                 $len = 100000;
                 if (count($argv) ==3)     $len = $this->toInt($argv[2]);
                 if ($offset === null || $len === null)    return null;
-                return (object)[ 'type' => 'string', 'value' => substr($arg, $offset, $len) ];
+                return (object)[ 'type' => 'string', 'value' => mb_substr($arg, $offset, $len) ];
             case 'sprintf': // string = sprintf(<string>,<arg1>...)
                 $format = $this->toString($argv[0]);
                 $args = [];
@@ -425,6 +448,27 @@ class Parser {
                 $out = (object)[ 'type' => 'string', 'value' => '' ]; // return empty string if there is no match
                 if ($in >= 1 && $in < count($argv))   $out = $argv[$in];
                 return $out;
+            case 'pie': // object = pie(<values>[,<labels>], object = pie(<value1>[,value2>...])
+            case 'bar':
+                $values = [];
+                $labels = [];
+                if ($argv[0]->type == 'array') {
+                    $vs = $argv[0];
+                    foreach ($vs->value as $arg)
+                        $values[] = $this->toFloat($arg);
+                    if (count($argv) == 2 && $argv[1]->type == 'array') {
+                        $vs = $argv[1];
+                        foreach ($vs->value as $arg)
+                            $labels[] = $this->toString($arg);
+                    }
+                    foreach ($values as $key => $v)
+                        if (!isset($labels[$key]))   $labels[$key] = '';
+                } else {
+                    for ($i = 0; $i < count($argv); $i++)
+                        $values[] = $this->toFloat($argv[$i]);
+                }
+
+                return (object)[ 'type' => 'object',  'objecttype' => $fn.'chart', 'value' => $values, 'labels' => $labels ];
         }
         return null;
     }
@@ -452,8 +496,10 @@ class Parser {
                 if ($min === null || $max === null)    return $this->err(7, "Invalid argument to $fn()");
                 return $this->fromFloat((int)($min + ($max-$min)*$r/$ceil));
             
-            case 'min': // number = min(<num1>, ...)
+            case 'min': // number = min(<num1>, ...), number = min(<array>)
                 $res = null;
+                if ($argv[0]->type == 'array')
+                    $argv = $argv[0]->value;
                 for ($i = 0; $i < count($argv); $i++) {
                     $arg = $argv[$i];
                     if ($arg->type != 'string' && $arg->type != 'number')   continue;
@@ -461,8 +507,10 @@ class Parser {
                 }
                 if ($res === null)   return $this->err(7, "Invalid argument to $fn()");
                 return $res;
-            case 'max': // number = max(<num1>, ....)
+            case 'max': // number = max(<num1>, ....), number = max(<array>)
                 $res = null;
+                if ($argv[0]->type == 'array')
+                    $argv = $argv[0]->value;
                 for ($i = 0; $i < count($argv); $i++) {
                     $arg = $argv[$i];
                     if ($arg->type != 'string' && $arg->type != 'number')   continue;
@@ -470,7 +518,18 @@ class Parser {
                 }
                 if ($res === null)   return $this->err(7, "Invalid argument to $fn()");
                 return $res;
-                
+            case 'sum': // number = sum(<num1>, ....), number = sum(<array>)
+                $res = null;
+                if ($argv[0]->type == 'array')
+                    $argv = $argv[0]->value;
+                $sum = 0;
+                for ($i = 0; $i < count($argv); $i++) {
+                    $arg = $argv[$i];
+                    if ($arg->type != 'string' && $arg->type != 'number')   continue;
+                    $sum += $this->toFloat($arg);
+                }
+                return $this->fromFloat($sum);
+        
             case 'floor': // number = floor(<number>)
                 $arg = $this->toFloat($argv[0]);
                 if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
@@ -558,12 +617,7 @@ class Parser {
         
         $matches = [];
         $res = preg_match($regexp, substr($this->input, $this->index), $matches, PREG_OFFSET_CAPTURE);
-        
-        if ($this->dbg) {
-            echo "regexp $regexp; input='".substr($this->input, $this->index)."' , res="; 
-            print_r($matches);
-            echo "<br>";
-        }
+
         if (!$res)   return null;
         
         $match = $matches[0];
@@ -635,7 +689,6 @@ class Parser {
         $cmps = [ '==','!=','<','<=','>','>=' ];
 
         while (true) {
-            if ($this->dbg)   echo "COMPARISON<br>";
             $backtrace = $this->index;
             
             $res = false;
@@ -649,7 +702,7 @@ class Parser {
                 $leftval = $this->binOp($leftval, $op, $rightval);
                 if ($leftval === null)   return null;
                 $res = true;
-            } else if ($this->dbg)   echo "comparison fail<br>";
+            }
             
             if (!$res) {
                 $this->index = $backtrace;
@@ -668,7 +721,6 @@ class Parser {
         if ($leftval === null)   return null;
 
         while (true) {
-            if ($this->dbg)   echo "PLUSMINUS<br>";
             $backtrace = $this->index;
             
             $res = false;
@@ -678,7 +730,7 @@ class Parser {
                 $leftval = $this->binOp($leftval, $op, $rightval);
                 if ($leftval === null)   return null;
                 $res = true;
-            } else if ($this->dbg)   echo "plusminus fail<br>";
+            }
             
             if (!$res) {
                 $this->index = $backtrace;
@@ -695,9 +747,8 @@ class Parser {
     private function exprMULDIV() {
         $leftval = $this->exprDOT();
         if ($leftval === null)    return null;
-        
+   
         while (true) {
-            if ($this->dbg)   echo "MULDIV<br>";
             $backtrace = $this->index;
 
             $res = false;
@@ -707,7 +758,7 @@ class Parser {
                 $leftval = $this->binOp($leftval, $op, $rightval);
                 if ($leftval === null)   return null;
                 $res = true;
-            } else if ($this->dbg)   echo "muldiv fail<br>";
+            }
             
             if (!$res) {
                 $this->index = $backtrace;
@@ -718,26 +769,32 @@ class Parser {
     }
 
     private function exprDOT() {
-
         // try if this is an objectname
         $leftval = $this->factor_obj();
         if ($leftval === null) {
             $leftval = $this->factor();
-            // what if it returned a function, and the function returns an object?
-            if ($leftval === null || $leftval->type != 'object')    return $leftval;
-        }
+// TODO what if it returned a function, and the function returns an object?
+            if ($leftval === null)   return null;
 
-        if ($this->dbg) {
-            echo "DOT3<br>";
-            print_r($leftval);
-        }
-        
-        while (true) {
-            if ($this->dbg) {
-                echo "DOT4<br>";
-                print_r($leftval);
+            if ($leftval->type == 'array') {
+                // an array may be followed by [N] to get the Nth element
+                if (substr($this->input, $this->index, 1) == '[') {
+                    $ar = $this->factor_array();
+                    if ($ar === null || $ar->type != 'array')
+                        return null;
+                    if (count($ar->value) != 1 || $ar->value[0]->type != 'number')
+                        return $this->err(11, "Bad indexing");
+                    $idx = $this->toInt($ar->value[0]);
+                    if ($idx < 0 || $idx >= count($leftval->value))
+                        return $this->fromString("");
+                    return $leftval->value[$idx];
+                }    
             }
 
+            if ($leftval->type != 'object')     return $leftval;
+        }
+
+        while (true) {
             // object must be followed by .
             $op = substr($this->input, $this->index, 1);
             if ($op !== '.')    return $leftval;
@@ -750,7 +807,6 @@ class Parser {
                 if ($leftval->type != 'object')    return $leftval;
                 $res = true;
             } else {
-                if ($this->dbg)   echo "DOT fail<br>";
                 $this->index = $backtrace;
                 return $leftval;
             }
@@ -769,13 +825,13 @@ class Parser {
         if ($res !== null)    return $res;
         $res = $this->factor_func();
         if ($res !== null)    return $res;
+        $res = $this->factor_array();
+        if ($res !== null)    return $res;
         $res = $this->factor_var();
         if ($res !== null)    return $res;
         $res = $this->factor_expr();
         if ($res !== null)    return $res;
-        
-        if ($this->dbg)
-           echo "factor fail ".substr($this->input, $this->index)."<br>";
+
         return null;
     }
     
@@ -932,26 +988,43 @@ class Parser {
             return $this->err(3, "Unknown func: $fn");
 
         // parse arguments
-        $argv = $this->factor_exprlist();
+        $argv = $this->factor_exprlist(')');
         if ($argv === null)
             return null;
 
         // validate arguments
         if (count($argv) < $fndef->min || count($argv) > $fndef->max)
             return $this->err(4, "Invalid arg count for fn: $fn");
-        
+
         $res = call_user_func($fndef->fn, $fn, $argv);
         return $res;
+    }
+
+    /**
+     * Check for array:  "[" <expression> [,<expression> ...] "]"
+     * @return object Returns null if nothing was found
+     */
+    private function factor_array() {
+        if (substr($this->input, $this->index, 1) != '[')   return null;
+        
+        $backtrace = $this->index;
+        $this->index++;
+
+        // parse arguments
+        $argv = $this->factor_exprlist(']');
+        if ($argv === null)
+            return null;
+        return (object)[ 'type' => 'array', 'value' => $argv ];
     }
     
     /**
      * Read a list of expressions, index must point to first char after (
      * @return array<object>
      */
-    private function factor_exprlist() {
+    private function factor_exprlist($end = ')') {
         $argv = [];
         while (1) {
-            if (substr($this->input, $this->index, 1) == ')') {
+            if (substr($this->input, $this->index, 1) == $end) {
                 // end of arg list
                 $this->index++;
                 return $argv;
@@ -960,6 +1033,7 @@ class Parser {
             $arg = $this->expr();
             if ($arg === null)
                 return null;
+    
             $argv[] = $arg;
             // check if there are more arguments
             if (substr($this->input, $this->index, 1) == ',')
