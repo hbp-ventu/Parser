@@ -2,7 +2,7 @@
 ini_set('display_errors', 'On');
 
 
-include_once("Parser.php");
+include_once("parser.php");
 
 
 /**
@@ -13,11 +13,8 @@ function lookup_variable_fn($name) {
     return null;
 }
 
-$p = new Parser('lookup_variable_fn');
+$p = new Parser();
 $p->registerConstant('randmax', 10);
-$p->enableMathsFunctions();
-$p->enableTimeFunctions();
-$p->enableStringFunctions();
 
 
 /**
@@ -97,7 +94,7 @@ foreach ($test as $t => $v) {
     echo "<tr>\n";
     echo   "<td>$t</td>";
     echo   "<td>$v</td>";
-    $v = $r->value;
+    $v = isset($r->value) ? $r->value : '';
     if (!is_scalar($v))   $v = "(non-scalar)";
     echo   "<td>(".$r->type.") ".$v."</td>"; 
     echo "</tr>\n";
