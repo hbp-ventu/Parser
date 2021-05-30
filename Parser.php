@@ -2,6 +2,26 @@
 
 // Based on https://github.com/ericbn/js-abstract-descent-parser
 
+// Simple use
+// $cfg = [];
+// $p = new Parser($cfg);
+// $res = $p->parse("123+456");
+// echo $res->value;
+//
+// Features
+// types: number string array object dict
+// strings are UTF-8 in "", \uXXXX is supported, so is \r \n \b \t \"
+// arithmetic/bitwise/logical ops: + - * / %  & | ^  && ||
+// comparison: <= >= == != === !== < >
+// names start with a-zA-Z_ and may contain a-zA-Z0-9_
+// variables may be supported through callbacks, see $cfg['variablefn']
+// functions may be defined by calling Parser->registerFunction()
+// constants may be defined by calling Parser->registerConstant(), either string,number or array
+// objects may be defined by calling Parser->registerObject()
+// arrays: myarray[2]+100
+// object: myobject.myproperty+100
+// dict: mydict={a:100,b:"second",c:myarray}         mydict.a !== 100
+// binary ops (+ - * <= >= === etc) may be overloaded
 
 class Parser {
     private $input = ''; // the expression being parsed
@@ -19,11 +39,18 @@ class Parser {
 
     private $terminator = ';';
 
+    private $regexp_name = "/^[a-zA-Z_][a-zA-Z_0-9]*/";
+    private $regexp_func = "/^[a-zA-Z_][a-zA-Z_0-9]*\(/"; // the '(' at the end is important
+    private $regexp_prop = "/^[a-zA-Z_][a-zA-Z_0-9]*/"; // currently must be the same as $regexp_name
+    private $regexp_number = "/^[-]?[0-9]+(\\.[0-9]+)?/";
+
     private $supported_types = [ 'number', 'string', 'object', 'array', 'data', 'dict' ];
     
     const INFINITY = 2100776655; // primitive way of handling result of eg division by zero
 
     private $cfg = [];
+    private $features = [
+    ];
 
     /**
      * Create new parser
@@ -42,8 +69,8 @@ class Parser {
                 unset($this->functions[$disfn]);
 
         $this->registerFunction('firstof', 'Parser::basefns', 1, 100);
-        $this->constants['true'] = (object)[ 'type' => 'number', 'value' => 1 ];
-        $this->constants['false'] = (object)[ 'type' => 'number', 'value' => 0 ];
+        $this->constants['true'] = self::fromFloat(1);
+        $this->constants['false'] = self::fromFloat(1);
 
     }
     
@@ -55,8 +82,6 @@ class Parser {
         $cfg = [
             'variablefn' => null,        // callback for reading variable value
             'variablefn_arg' => null,    // callback arg
-            'setvariablefn' => null,     // callback for setting variable
-            'setvariablefn_arg' => null, // callback arg
             'enablemathsfns' => true,    // enable groups of functions
             'enabletimefns' => true,
             'enablestringfns' => true,
@@ -79,18 +104,6 @@ class Parser {
         }
         if ($this->dbg)   echo "ERR: $errtxt<br>";
         return null;
-    }
-    
-    /**
-     * Register a variable
-     * @param string $varname
-     * @param string $type Type of the variable, see Parser::$supported_types
-     * @param mixed $value Initial value, ignored if $readfn is set
-     * @param function $readfn 
-     */
-    public function registerVariable($varname, $type, $value, $readfn = false) {
-        // TODO
-        return false;
     }
     
     /**
@@ -147,7 +160,7 @@ class Parser {
     }
     
     /**
-     * Parse multiple expressions, possibly assign results to variables EXPERIMENTAL
+     * Parse multiple expressions, possibly assign results to variables
      * @param string $expr The expressions must be separated by the terminator char (typically ';')
      * @return object 
      */
@@ -177,61 +190,61 @@ class Parser {
      * @return object 
      */
     public function parse($expr) {
-        $expr = $this->preprocess($expr); // strip unnecessay spaces
+        $expr = $this->preprocess($expr); // strip unnecessary spaces
         if (!is_string($expr))    return null;
-        
-        $this->input = $expr;
-        $this->index = 0;
-        
-        // TODO check for: <variable>[<space>][<op>]"="
-        
-        $assignto = $this->regExp("/^[a-zA-Z_][a-zA-Z_0-9]*=/");
-        if ($assignto) {
-            $assignto = substr($assignto, 0, strlen($assignto)-1); // strip = at the end
-            $expr = substr($this->input, $this->index); // remove '<var>=' from the beginning
-            if (!$this->isValidName($assignto))   return $this->err(12, 'Invalid assignment');
-        }
 
         $input = $this->input; // in case the parser is called recursively
         $index = $this->index;
-        $res = $this->parse2($expr);
-        $this->input = $input;
-        $this->index = $index;
-        if (!$res || $res->type === 'error')  return $res;
-
-        if ($assignto) {
-            $set = false;
-            if (isset($this->cfg['setvariablefn']) && is_callable($this->cfg['setvariablefn'])) {
-                $param = isset($this->cfg['setvariablefn_arg']) ? $this->cfg['setvariablefn_arg'] : null; 
-                $set = call_user_func($this->cfg['setvariablefn'], $assignto, $res, $param, $this);
-            }
-            if (!$set)
-                $this->variables[$assignto] = $res;
-        }
-        return $res;
-    }
-    
-    private function parse2($expr) {
+        
         $this->input = $expr;
         $this->index = 0;
         $this->errno = 0;
 
         $res = $this->expr();
+
+        $this->input = $input;
+        $this->index = $index;
         if ($res === null) {
             $this->err(6, "Failed to parse the expression");
             return (object)[ 'type' => 'error', 'value' => $this->errno, 'name' => $this->errtxt ];
         }
 
-        // nothing allowed after the expression, except a ';'
-        if ($this->index != strlen($this->input) && substr($this->input, $this->index, 1) != $this->terminator) {
-            $this->err(5, "Junk at offset ".($this->index+1)." ('... ".substr($this->input, $this->index-5)."')");
-            return (object)[ 'type' => 'error', 'value' => $this->errno, 'name' => $this->errtxt ];
-        }
         return $res;
     }
-     
+    
+    /**
+     * Read/set/check a variable
+     * @param string $op What to do, either 'read' or 'set' or 'check'
+     * @param string $var The name of the variable
+     * @param object $value The value to set (if $op='set')
+     */
+    private function varOp($op, $var, $value = false) {
+        $rval = null;
+        if (is_callable($this->cfg['variablefn'])) {
+            $param = isset($this->cfg['variablefn_arg']) ? $this->cfg['variablefn_arg'] : null; 
+            $rval = call_user_func($this->cfg['variablefn'], $op, $var, $value, $param, $this);
+        }
+        
+        // simple variable handling
+        if ($op == 'set' && !$rval)
+            $this->variables[$var] = $value;
+        else if ($op == 'check' && !$rval) {
+            if (isset($this->variables[$var]))
+                return $this->variables[$var];
+        } else if ($op == 'read' && !$rval) {
+            // last resort, check for built in variables
+            if (isset($this->variables[$var])) 
+                return $this->variables[$var];
+        }
+        return $rval;
+    }
+
+    /**
+     * Strip space outside quotes and do a few checks
+     * @param string $expr
+     * @return mixed
+     */
     public function preprocess($expr) {
-        // strip space outside quotes, and unescape
         $res = '';
         $inquote = false;
         $esc = false;
@@ -261,8 +274,8 @@ class Parser {
         $this->registerFunction('max', 'Parser::mathsfns', 1, 100);
         $this->registerFunction('sum', 'Parser::mathsfns', 1, 100);
         
-        $this->constants['PI'] = (object)[ 'type' => 'number', 'value' => 3.141592653589793 ];
-        $this->constants['e'] = (object)[ 'type' => 'number', 'value' => 2.718281828459045 ];
+        $this->constants['PI'] = self::fromFloat(3.141592653589793);
+        $this->constants['e'] = self::fromFloat(2.718281828459045);
     }
 
     public function enableTimeFunctions() {
@@ -274,6 +287,8 @@ class Parser {
     }
     
     public function enableMiscFunctions() {
+        $this->registerFunction('get_class', 'Parser::miscfns', 1, 1);
+        $this->registerFunction('typeof', 'Parser::miscfns', 1, 1);
         $this->registerFunction('caseof', 'Parser::miscfns', 2, 100);
         $this->registerFunction('pie', 'Parser::miscfns', 1, 100);
         $this->registerFunction('bar', 'Parser::miscfns', 1, 100);
@@ -336,7 +351,7 @@ class Parser {
         $res = [];
         foreach ($val->value as $v) {
             $s = self::toString($v);
-            if ($s === null)   $s = (object)['type' => 'string', 'value' => ''];
+            if ($s === null)   $s = self::fromString('');
             $res[] = $s;
         }
         return $res;
@@ -363,7 +378,7 @@ class Parser {
     }
     
     /**
-     * Convert a array to an internal value (ie an object)
+     * Convert an array to an internal value (ie an object)
      * @param array $val
      * @return object
      */
@@ -376,13 +391,13 @@ class Parser {
             else if (is_numeric($v))
                 $arr[] = self::fromFloat($v);
         }
-        return (object)[ 'type' => 'number', 'value' => $arr ];
+        return (object)[ 'type' => 'array', 'value' => $arr ];
     }
 
     /**
      * Handler for misc functions
      */
-    private static function basefns($fn, $argv) {
+    private static function basefns($fn, $argv, $param, $parser) {
         switch ($fn) {
             case 'firstof': // res = firstof(<arg1>,...)
                 foreach ($argv as $arg) {
@@ -405,7 +420,7 @@ class Parser {
     /**
      * Handler for a bunch of time functions
      */
-    private static function timefns($fn, $argv) {
+    private static function timefns($fn, $argv, $param, $parser) {
         switch ($fn) {
             case 'date': // string = date([<format>,[<timestamp>]])
                 $ts = time();
@@ -413,20 +428,19 @@ class Parser {
                 if (count($argv) >= 1)   $format = self::toString($argv[0]);
                 if (count($argv) >= 2)   $ts = self::toInt($argv[1]);
                 if ($ts === null || $format === null)   return null;
-                return (object)[ 'type' => 'string', 'value' => date($format, $ts) ];
+                return self::fromString(date($format, $ts));
             case 'time': // number = time()
-                return (object)[ 'type' => 'number', 'value' => time() ];
+                return self::fromFloat(time());
             case 'strtotime': // number = strtotime(<string>)
-                return (object)[ 'type' => 'number', 'value' => strtotime(self::toString($argv[0])) ];
+                return self::fromFloat(strtotime(self::toString($argv[0])));
             case 'timeadjust': // number = timeadjust(<timestamp>, <string>)
                 $t = date('Y-m-d H:i:s', self::toInt($argv[0]));
-                $t = $this->dateadjust($t, self::toString($argv[1]));
-                $t = strtotime($t);
-                return (object)[ 'type' => 'number', 'value' => $t ];
+                $t = $parser->dateadjust($t, self::toString($argv[1]));
+                return self::fromFloat(strtotime($t));
             case 'dateadjust': // string = dateadjust(<date>, <string>)
                 $hastime = strlen(self::toString($argv[0])) == 19;
-                $t = $this->dateadjust(self::toString($argv[0]), self::toString($argv[1]));
-                return (object)[ 'type' => 'number', 'value' => substr($t, 0, $hastime ? 19 : 10) ];
+                $t = $parser->dateadjust(self::toString($argv[0]), self::toString($argv[1]));
+                return self::fromFloat(substr($t, 0, $hastime ? 19 : 10));
         }
         return null;
     }
@@ -437,7 +451,7 @@ class Parser {
      * @param string $actions List of actions
      * @return string Date+time, Y-m-d H:i:s
      */
-    private static function dateadjust($date, $actions) {
+    private function dateadjust($date, $actions) {
         $weekdays = [ 'mon','tue','wed','thu','fri','sat','sun'];
         $months = [ 'jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec' ];
         $units = [ 'yr','mo','da','wk','hr','mi','se' ];
@@ -536,46 +550,46 @@ class Parser {
     /**
      * Handler for a bunch of string functions
      */
-    private static function stringfns($fn, $argv) {
+    private static function stringfns($fn, $argv, $param, $parser) {
         switch ($fn) {
             case 'implode': // string = implode(<string>,<array>)
-                if ($argv[0]->type != 'string' || $argv[1]->type != 'array')   return $this->err(7, "Invalid argument to $fn()");
+                if ($argv[0]->type != 'string' || $argv[1]->type != 'array')   return $parser->err(7, "Invalid argument to $fn()");
                 $parts = self::toStringArray($argv[1]);
-                return (object)[ 'type' => 'string', 'value' => implode(self::toString($argv[0]), $parts) ];
+                return self::fromString(implode(self::toString($argv[0]), $parts));
             case 'explode': // array = explode(<string>,<string>)
-                if ($argv[0]->type != 'string' || $argv[1]->type != 'string')   return $this->err(7, "Invalid argument to $fn()");
+                if ($argv[0]->type != 'string' || $argv[1]->type != 'string')   return $parser->err(7, "Invalid argument to $fn()");
                 $parts = explode(self::toString($argv[0]), self::toString($argv[1]));
                 $res = [ 'type' => 'array', 'value' => [] ];
-                for ($i = 0; $i < count($parts); $i++)   $res['value'][] = (object)[ 'type' => 'string', 'value' => $parts[$i] ];
+                for ($i = 0; $i < count($parts); $i++)   $res['value'][] = self::fromString($parts[$i]);
                 return (object)$res;
             case 'length': // number = length(<string>), number = length(<array>)
                 if ($argv[0]->type == 'array')
-                    return (object)[ 'type' => 'number', 'value' => count($argv[0]->value) ];
+                    return self::fromFloat(count($argv[0]->value));
                 else if ($argv[0]->type == 'dict')
-                    return (object)[ 'type' => 'number', 'value' => count(array_keys($argv[0]->value)) ];
+                    return self::fromFloat(count(array_keys($argv[0]->value)));
                 $arg = self::toString($argv[0]);
                 if ($arg === null)    return null;
-                return (object)[ 'type' => 'number', 'value' => mb_strlen($arg) ];
+                return self::fromFloat(mb_strlen($arg));
             case 'tolower': // string = tolower(<string>)
                 $arg = self::toString($argv[0]);
                 if ($arg === null)    return null;
-                return (object)[ 'type' => 'string', 'value' => mb_strtolower($arg) ];
+                return self::fromString(mb_strtolower($arg));
             case 'toupper': // string = toupper(<string>)
                 $arg = self::toString($argv[0]);
                 if ($arg === null)    return null;
-                return (object)[ 'type' => 'string', 'value' => mb_strtoupper($arg) ];
+                return self::fromString(mb_strtoupper($arg));
             case 'substr': // string = substr(<string>,<int>), string = substr(<string>,<int>,<int>)
                 $string = self::toString($argv[0]);
                 $offset = self::toInt($argv[1]);
                 $len = 100000;
                 if (count($argv) == 3)     $len = self::toInt($argv[2]);
-                if ($offset === null || $len === null)    return $this->err(7, "Invalid argument to $fn()");
-                return (object)[ 'type' => 'string', 'value' => mb_substr($string, $offset, $len) ];
+                if ($offset === null || $len === null)    return $parser->err(7, "Invalid argument to $fn()");
+                return self::fromString(mb_substr($string, $offset, $len));
             case 'sprintf': // string = sprintf(<string>,<arg1>...)
                 $format = self::toString($argv[0]);
                 $args = [];
                 for ($i = 1; $i < count($argv); $i++)   $args[] = $argv[$i]->value;
-                return (object)[ 'type' => 'string', 'value' => vsprintf($format, $args) ];
+                return self::fromString(vsprintf($format, $args));
             case 'replace': // string = replace(<from>, <to>, <string>)
                 return str_replace(self::toString($argv[0]),
                                    self::toString($argv[1]),
@@ -585,26 +599,35 @@ class Parser {
     }
 
 
-    private static function miscfns($fn, $argv) {
+    private static function miscfns($fn, $argv, $param, $parser) {
         switch ($fn) {
+            case 'get_class':
+                if (count($argv) != 1)   return $parser->err(7, "Invalid argument to $fn()");
+                if ($argv[0]->type != 'object')   return $parser->err(7, "Invalid argument to $fn()");
+                return self::fromString($argv[0]->value->cls);
+                
+            case 'typeof': // string = typeof(<value>)
+                if (count($argv) != 1)   return $parser->err(7, "Invalid argument to $fn()");
+                return self::fromString($argv[0]->type);
+
             case 'caseof': // value = caseof(<input>,<option1>[,<option2]...)
                 $in = self::toInt($argv[0]);
                 if ($in >= 1 && $in < count($argv))   return $argv[$in];
-                return (object)[ 'type' => 'string', 'value' => '' ]; // return empty string if there is no match
+                return self::fromString(''); // return empty string if there is no match
 
             case 'table':
-                if (count($argv) == 0)   return $this->err(7, "Invalid argument to $fn()");
+                if (count($argv) == 0)   return $parser->err(7, "Invalid argument to $fn()");
                 $table = [];
                 $cols = 0;
                 // find max table row length
                 for ($i = 0; $i < count($argv); $i++)
                     if ($argv[$i]->type != 'array')
-                        return $this->err(7, "Invalid argument to $fn()");
-                    else if (count($argv[$i]->value) > $cols)
+                        return $parser->err(7, "Invalid argument to $fn()");
+                    if (count($argv[$i]->value) > $cols)
                         $cols = count($argv[$i]->value);
                 
                 for ($i = 0; $i < count($argv); $i++) {
-                    $row = $this->toStringArray($argv[$i]);
+                    $row = $parser->toStringArray($argv[$i]);
                     // make sure all rows have the same length
                     for ($col = count($row); $col < $cols; $col++)
                         $row[] = '';
@@ -638,7 +661,7 @@ class Parser {
     /**
      * Handler for a bunch of maths functions
      */
-    private static function mathsfns($fn, $argv) {
+    private static function mathsfns($fn, $argv, $param, $parser) {
         switch ($fn) {
             case 'random': // float = random(), float = random(<max>), int = random(<min>,<max>)
                 $ceil = 1000000;
@@ -648,13 +671,13 @@ class Parser {
                 // 1 arg
                 if (count($argv) == 1) {
                     $max = self::toInt($argv[0]);
-                    if ($max === null)    return $this->err(7, "Invalid argument to $fn()");
+                    if ($max === null)    return $parser->err(7, "Invalid argument to $fn()");
                     return self::fromFloat($max*$r/$ceil);
                 }
                 // 2 args
                 $min = self::toInt($argv[0]);
                 $max = self::toInt($argv[1]);
-                if ($min === null || $max === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($min === null || $max === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat((int)($min + ($max-$min)*$r/$ceil));
             
             case 'min': // number = min(<num1>, ...), number = min(<array>)
@@ -666,7 +689,7 @@ class Parser {
                     if ($arg->type != 'string' && $arg->type != 'number')   continue;
                     if ($res === null || $arg->value < $res->value)   $res = $arg;
                 }
-                if ($res === null)   return $this->err(7, "Invalid argument to $fn()");
+                if ($res === null)   return $parser->err(7, "Invalid argument to $fn()");
                 return $res;
             case 'max': // number = max(<num1>, ....), number = max(<array>)
                 $res = null;
@@ -677,7 +700,7 @@ class Parser {
                     if ($arg->type != 'string' && $arg->type != 'number')   continue;
                     if ($res === null || $arg->value > $res->value)   $res = $arg;
                 }
-                if ($res === null)   return $this->err(7, "Invalid argument to $fn()");
+                if ($res === null)   return $parser->err(7, "Invalid argument to $fn()");
                 return $res;
             case 'sum': // number = sum(<num1>, ....), number = sum(<array>)
                 $res = null;
@@ -693,65 +716,65 @@ class Parser {
         
             case 'floor': // number = floor(<number>)
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(floor($arg));
             case 'ceil': // number = ceil(<number>)
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(ceil($arg));
             case 'round': // number = round(<number>)
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(round($arg));
 
             case 'sin':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(sin($arg));
             case 'cos':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(cos($arg));
             case 'tan':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(tan($arg));
             case 'asin':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(asin($arg));
             case 'acos':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(acos($arg));
             case 'atan':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(atan($arg));
             case 'log':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(log($arg));
             case 'ln':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(ln($arg));
             case 'sqrt':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(sqrt($arg));
             case 'exp':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(exp($arg));
             case 'abs':
                 $arg = self::toFloat($argv[0]);
-                if ($arg === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(abs($arg));
             case 'pow': // number = pow(<number>, <number>)
                 $arg1 = self::toFloat($argv[0]);
                 $arg2 = self::toFloat($argv[1]);
-                if ($arg1 === null || $arg2 === null)    return $this->err(7, "Invalid argument to $fn()");
+                if ($arg1 === null || $arg2 === null)    return $parser->err(7, "Invalid argument to $fn()");
                 return self::fromFloat(pow($arg1, $arg2));
         }
         return null;
@@ -790,8 +813,32 @@ class Parser {
         $this->index += strlen($match[0]);
         return $match[0];
     }
-    
+
+    private $assign_ops = ['=', '+=', '-=', '*=', '|=', '&=', '^='];
     private function binOp($leftval, $op, $rightval) {
+        if (in_array($op, $this->assign_ops)) {
+            $res = false;
+            switch ($op) {
+                case '=':
+                    $res = $rightval;
+                    break;
+                case '+=':
+                case '-=':
+                case '*=':
+                case '/=':
+                case '&=':
+                case '|=':
+                case '^=':
+                    $res = $this->binOp($leftval, substr($op, 0, 1), $rightval);
+                    break;
+            }
+            if ($res) { // update the object on the left side, in case it is a variable etc
+                $leftval->type = $res->type;
+                $leftval->value = $res->value;
+            }
+            return $leftval;
+        }
+        
         $fn = isset($this->cfg['overloadfn'][$op]) ? $this->cfg['overloadfn'][$op] : '';
         if (is_callable($fn)) {
             $arg = isset($this->cfg['overloadfn_arg'][$op]) ? $this->cfg['overloadfn_arg'][$op] : null; 
@@ -799,10 +846,10 @@ class Parser {
             // the overload fn should return false to use the builtin handler
             if ($res !== false)    return $res;
         }
-        
+
         if ($op == '+' && $leftval->type == 'string' && $rightval->type == 'string') {
             // + on string
-            return (object)[ 'type' => 'string', 'value' => $leftval->value.$rightval->value ];
+            return self::fromString($leftval->value.$rightval->value);
         }
         
         // the rest only works for numbers and strings
@@ -842,6 +889,22 @@ class Parser {
                 $res = [];
                 for ($i = $li; $i <= $ri; $i++)   $res[] = (object)['type' => 'number', 'value' => $i];
                 return (object)[ 'type' => 'array', 'value' => $res];
+
+            case '&&':
+                $l = ($li && $ri) ? 1:0;
+                break;
+            case '||':
+                $l = ($li || $ri) ? 1:0;
+                break;
+            case '|':
+                $l = $li | $ri;
+                break;
+            case '&':
+                $l = $li & $ri;
+                break;
+            case '^':
+                $l = $li ^ $ri;
+                break;
 
             case '===':
             case '!==':
@@ -889,9 +952,62 @@ class Parser {
     }
     
     private function expr() {
-        return $this->exprCOMPARISON();
+        return $this->exprLOGICAL();
     }
-              
+    
+    private function exprLOGICAL() {
+        $leftval = $this->exprBITWISE();
+        if ($leftval === null)   return null;
+
+        $ops = ['||','&&'];
+
+        while (true) {
+            $backtrace = $this->index;
+            
+            $res = false;
+            $rightval = '';
+            $op = substr($this->input, $this->index, 2);
+            $this->index += 2;
+            if (in_array($op, $ops) && ($rightval = $this->exprBITWISE()) !== null) {
+                $leftval = $this->binOp($leftval, $op, $rightval);
+                if ($leftval === null)   return null;
+                $res = true;
+            }
+            
+            if (!$res) {
+                $this->index = $backtrace;
+                return $leftval;
+            }
+        }
+        return null;
+    }
+    
+    private function exprBITWISE() {
+        $leftval = $this->exprCOMPARISON();
+        if ($leftval === null)   return null;
+
+        $ops = ['|','&','^'];
+
+        while (true) {
+            $backtrace = $this->index;
+            
+            $res = false;
+            $rightval = '';
+            $op = substr($this->input, $this->index++, 1);
+            if (in_array($op, $ops) && ($rightval = $this->exprCOMPARISON()) !== null) {
+                $leftval = $this->binOp($leftval, $op, $rightval);
+                if ($leftval === null)   return null;
+                $res = true;
+            }
+            
+            if (!$res) {
+                $this->index = $backtrace;
+                return $leftval;
+            }
+        }
+        return null;
+    }
+
     /**
      * Check for comparison expression:  <expression> "==" <expression>
      * @return mixed
@@ -900,18 +1016,23 @@ class Parser {
         $leftval = $this->exprPLUSMINUS();
         if ($leftval === null)   return null;
 
-        $cmps = [ '==','!=','<','<=','>','>=', '===', '!==' ];
+        $cmps = [ '==','!=','<','<=','>','>=', '===', '!=='];
+        $cmps = array_merge($cmps, $this->assign_ops);
 
         while (true) {
             $backtrace = $this->index;
             
             $res = false;
             $rightval = '';
-            // look for 1-char or 2-chars comparison operator
-            $op1 = substr($this->input, $this->index++, 1);
-            $op = $op1.substr($this->input, $this->index++, 1);
-            if (!in_array($op, $cmps)) {  $op = $op1;  $this->index--;  }
-
+            // look for 1-char, 2-chars or 3-chars comparison operator
+            $one = substr($this->input, $this->index++, 1);
+            $two = $one.substr($this->input, $this->index++, 1);
+            $three = $two.substr($this->input, $this->index++, 1);
+            $op = $three;
+            if (!in_array($op, $cmps)) {
+                $op = $two;   $this->index--;
+                if (!in_array($op, $cmps)) {  $op = $one;  $this->index--;  }
+            }
             if ($op && in_array($op, $cmps) && ($rightval = $this->exprPLUSMINUS()) !== null) {
                 $leftval = $this->binOp($leftval, $op, $rightval);
                 if ($leftval === null)   return null;
@@ -961,7 +1082,7 @@ class Parser {
     private function exprMULDIV() {
         $leftval = $this->exprDOT();
         if ($leftval === null)    return null;
-   
+
         while (true) {
             $backtrace = $this->index;
 
@@ -981,77 +1102,92 @@ class Parser {
         }
         return null;
     }
-
+    
     /**
-     * Check for property/element access:  <expression> "." <expression>  or
-     *                                     <expression> "[" <expression> "]"
+     * Read a value from an array or dict
+     * @param object $leftval A value or type 'array' or 'dict'
+     * @return object
+     */
+    private function accessDictArray($leftval) {
+        if ($leftval === null)   return null;
+
+        if ($leftval->type == 'array') {
+            // eg. "array_variable[1+2]"
+            // an array may be followed by [N] to get the Nth element
+            if (substr($this->input, $this->index, 1) == '[') {
+                $ar = $this->factor_array();
+                if ($ar === null || $ar->type != 'array')
+                    return null;
+                if (count($ar->value) != 1 || $ar->value[0]->type != 'number')
+                    return $this->err(11, "Bad indexing");
+                $idx = self::toInt($ar->value[0]);
+                if ($idx < 0 || $idx >= count($leftval->value))
+                    return self::fromString("");
+                return $leftval->value[$idx];
+            }
+
+        } else if ($leftval->type == 'dict') {
+            // eg.  'dict_variable.somekey'   or  'dict_variable["somekey"]'
+            // a dict must be followed by . and then a key
+            if (substr($this->input, $this->index, 1) === '.') {
+                $this->index++; // skip .
+                // get the key name of the value being accessed
+                $key = $this->regExp($this->regexp_prop);
+                if ($key === null)
+                    return null;
+                if (!isset($leftval->value[$key]))
+                    return $this->err(16, "Key '$key' not found in dict");
+                return $leftval->value[$key];
+
+            } else if (substr($this->input, $this->index, 1) === '[') {
+                $ar = $this->factor_array();
+                if ($ar === null || $ar->type != 'array')
+                    return null;
+                if (count($ar->value) != 1 || $ar->value[0]->type != 'string')
+                    return $this->err(11, "Bad indexing");
+                $key = self::toString($ar->value[0]);
+                if (!isset($leftval->value[$key]))
+                    return $this->err(16, "Key '$key' not found in dict");
+                return $leftval->value[$key];
+            }
+            
+        } else {
+            if ($leftval->type != 'object')     return $leftval;
+        }
+        return $leftval;
+    }
+        
+    /**
+     * Check for property/element access:  <varname> "." <expression>  or
+     *                                     <varname> "[" <expression> "]"
      * @return mixed
      */
     private function exprDOT() {
-        // try if this is an objectname
+        // try if this is an object/dict name
         $leftval = $this->factor_obj();
+
         if ($leftval === null) {
             $leftval = $this->factor();
-// TODO what if it returned a function, and the function returns an object?
-            if ($leftval === null)   return null;
-
-            if ($leftval->type == 'array') {
-                // eg. "array_variable[1+2]"
-                // an array may be followed by [N] to get the Nth element
-                if (substr($this->input, $this->index, 1) == '[') {
-                    $ar = $this->factor_array();
-                    if ($ar === null || $ar->type != 'array')
-                        return null;
-                    if (count($ar->value) != 1 || $ar->value[0]->type != 'number')
-                        return $this->err(11, "Bad indexing");
-                    $idx = self::toInt($ar->value[0]);
-                    if ($idx < 0 || $idx >= count($leftval->value))
-                        return self::fromString("");
-                    return $leftval->value[$idx];
-                }
-
-            } else if ($leftval->type == 'dict') {
-                // eg.  'dict_variable.somekey'   or  'dict_variable["somekey"]'
-                // a dict must be followed by . and then a key
-                if (substr($this->input, $this->index, 1) === '.') {
-                    $this->index++; // skip .
-                    // get the key name of the value being accessed
-                    $key = $this->regExp("/^[a-zA-Z_0-9]*/");
-                    if ($key === null)
-                        return null;
-                    if (!isset($leftval->value[$key]))
-                        return $this->err(16, "Key '$key' not found in dict");
-                    return $leftval->value[$key];
-
-                } else if (substr($this->input, $this->index, 1) === '[') {
-                    $ar = $this->factor_array();
-                    if ($ar === null || $ar->type != 'array')
-                        return null;
-                    if (count($ar->value) != 1 || $ar->value[0]->type != 'string')
-                        return $this->err(11, "Bad indexing");
-                    $key = self::toString($ar->value[0]);
-                    if (!isset($leftval->value[$key]))
-                        return $this->err(16, "Key '$key' not found in dict");
-                    return $leftval->value[$key];
-                }
-                
-            } else
-                if ($leftval->type != 'object')     return $leftval;
+            
+            $res = $this->accessDictArray($leftval);
+            if (!$res)   return null;
+            if ($res->type != 'object')    return $res;
         }
 
         while (true) {
-            // eg.  "object_variable.propname"
-            // object must be followed by .
+            // eg.  "object_dict_variable.propname"
+            // object/dict must be followed by .
             $op = substr($this->input, $this->index, 1);
             if ($op !== '.')    return $leftval;
 
             $backtrace = $this->index;
             $this->index++; // skip .
 
-            if (($prop = $this->factor_prop($leftval)) !== null) {
+            $prop = $this->factor_prop($leftval);
+            if ($prop !== null) {
                 $leftval = $prop;
-                if ($leftval->type != 'object')    return $leftval;
-                $res = true;
+                if ($leftval->type != 'object' && $leftval->type != 'dict')
+                    return $leftval;
             } else {
                 $this->index = $backtrace;
                 return $leftval;
@@ -1079,23 +1215,22 @@ class Parser {
         if ($res !== null)    return $res;
         $res = $this->factor_expr();
         if ($res !== null)    return $res;
-
         return null;
     }
     
     /**
      * Check for number: <number>
-     * @return object Returns null if nothing was found
+     * @return object Returns an object of type 'number', or null if nothing was found
      */
     private function factor_num() {
-        $str = $this->regExp("/^[-]?[0-9]+(\\.[0-9]+)?/");
+        $str = $this->regExp($this->regexp_number);
         if ($str === null)   return null;
         return self::fromFloat((float)$str);
     }
         
     /**
      * Check for string: " <chars> "
-     * @return object Returns null if nothing was found
+     * @return object Returns an object of type 'string', or null if nothing was found
      */
     private function factor_str() {
         if (substr($this->input, $this->index, 1) != '"')    return null;
@@ -1105,11 +1240,11 @@ class Parser {
         $res = '';
         while (true) {
             $c = substr($this->input, $this->index++, 1);
-            if (!$c) {
+            if ($c == '') {
                 $this->index = $backtrace;
                 return null;
             }
-            if ($c == '"')    return (object)[ 'type' => 'string', 'value' => $res ];
+            if ($c == '"')    return self::fromString($res);
             
             if ($c == '\\') {
                 $c = substr($this->input, $this->index++, 1);
@@ -1118,6 +1253,7 @@ class Parser {
                     case 'r':    $res .= "\r";   break;
                     case 't':    $res .= "\t";   break;
                     case 'b':    $res .= "\b";   break;
+                    case '"':    $res .= "\"";   break;
                     case '\\':   $this->index--;  $res .= "\\";   break;
                     case 'u':
                         $res .= mb_chr(hexdec(substr($this->input, $this->index, 4)));
@@ -1138,7 +1274,7 @@ class Parser {
     public function isValidName($name) {
         if (!$name)   return false;
         $matches = [];
-        $res = preg_match("/^[a-zA-Z_][a-zA-Z_0-9]*/", $name, $matches, PREG_OFFSET_CAPTURE);
+        $res = preg_match($this->regexp_name, $name, $matches, PREG_OFFSET_CAPTURE);
         if (!$res)   return false;
         
         $match = $matches[0];
@@ -1147,24 +1283,34 @@ class Parser {
     }
 
     /**
-     * Check for object property
-     * @param object $obj The object
-     * @return object Returns null if nothing was found
+     * Check for object property or dict element, ie. something following the . operator
+     * @param object $obj The object/dict
+     * @return object Returns an object with the prop value, or null if nothing was found
      */
     private function factor_prop($obj) {
         $backtrace = $this->index;
-        $prop = $this->regExp("/^[a-zA-Z_][a-zA-Z_0-9]*/");
+        $prop = $this->regExp($this->regexp_prop);
         if ($prop === null)    return null;
 
+        if ($obj->type == 'dict') {
+            if (isset($obj->value[$prop]))
+                return $obj->value[$prop];
+            $this->index = $backtrace;
+            return null;
+        }
+
         // check if prop exists in object
-        $proplist = $obj->value->properties;
-        // if the object provides a properties[] array with all allowed props...
-        if (is_array($proplist) && isset($prop[$proplist])) {
+        $proplist = false;
+        if (isset($obj->value->properties))
+            $proplist = $obj->value->properties;
+  
+        // if the object provides a properties[] array with fixed props...
+        if (is_array($proplist) && isset($proplist[$prop])) {
             $propval = $proplist[$prop];
             if (is_string($propval))
-                return (object)['type' => 'string', 'value' => $propval];
+                return self::fromString($propval);
             if (is_numeric($propval))
-                return (object)['type' => 'number', 'value' => $propval];
+                return self::fromFloat($propval);
             if (is_callable($propval)) {
 			    if (substr($this->input, $this->index, 1) != '(')
                     return null;
@@ -1173,7 +1319,12 @@ class Parser {
 				$argv = $this->factor_exprlist();
 				if ($argv === null)
 					return null;
+
+                $index = $this->index;
+                $input = $this->input;
 				$res = call_user_func($propval, $prop, $argv);
+                $this->input = $input;
+                $this->index = $index;
 				return $res;
 			}
             if (is_object($propval) && $propval->type)
@@ -1203,19 +1354,31 @@ class Parser {
         if ($argv === null)
             return null;
 
+        $index = $this->index;
+        $input = $this->input;
         $res = call_user_func($propval->fn, $prop, $argv);
+        $this->input = $input;
+        $this->index = $index;
         return $res;
     }
 
     /**
-     * Check for name of exiting object
-     * @return object Returns null if nothing was found
+     * Check for name of existing object or dict
+     * @return object Returns an object of type 'object' or 'dict', or null if nothing was found
      */
     private function factor_obj() {
         $backtrace = $this->index;
-        $objname = $this->regExp("/^[a-zA-Z_][a-zA-Z_0-9]*/");
+        $objname = $this->regExp($this->regexp_name);
         if (!$objname)    return null;
 
+        $var = $this->varOp('check', $objname);
+        if ($var) {
+            if ($var->type == 'dict' || $var->type == 'object')
+                return $var;
+            $this->index = $backtrace;
+            return null;
+        }
+        
         if (!isset($this->objects[$objname])) {
             $this->index = $backtrace;
             return null;
@@ -1225,28 +1388,19 @@ class Parser {
 
     /**
      * Check for variables/constants/object reference: <name>
-     * @return object Returns null if nothing was found
+     * @return object Returns an object with the value, or null if nothing was found
      */
     private function factor_var() {
-        $str = $this->regExp("/^[a-zA-Z_][a-zA-Z_0-9]*/");
+        $backtrace = $this->index;
+        $str = $this->regExp($this->regexp_name);
         if (!$str)    return null;
-        
+
         // check for constants
         if (isset($this->constants[$str])) 
             return $this->constants[$str];
-
-        // check for variables
-        if (isset($this->cfg['variablefn']) && is_callable($this->cfg['variablefn'])) {
-            $param = isset($this->cfg['variablefn_arg']) ? $this->cfg['variablefn_arg'] : null; 
-            $res = call_user_func($this->cfg['variablefn'], $str, $param, $this);
-            if ($res !== null)    return $res;
-        }
-        
-        // last resort, check for built in variables
-        if (isset($this->variables[$str])) 
-            return $this->variables[$str];
-
-        return null;
+        $var = $this->varOp('read', $str);
+        if (!$var)   $this->index = $backtrace;
+        return $var;
     }
 
     /**
@@ -1255,15 +1409,18 @@ class Parser {
      */
     private function factor_expr() {
         $val = null;
-        return ($this->char('(') && ($val = $this->expr()) !== null && $this->char(')')) ? $val : null;
+        $backtrace = $this->index;
+        $res = ($this->char('(') && ($val = $this->expr()) !== null && $this->char(')')) ? $val : null;
+        if (!$res)    $this->index = $backtrace;
+        return $res;
     }
     
     /**
      * Check for function: <name> "(" <expression> ")"
-     * @return object Returns null if nothing was found or on error
+     * @return object Returns an object with the value of the fn call, or null if nothing was found or on error
      */
-    private function factor_func() {        
-        $fn = $this->regExp("/^[a-zA-Z_][a-zA-Z_0-9]*\(/");
+    private function factor_func() {
+        $fn = $this->regExp($this->regexp_func);
         if ($fn === null)    return null;
 
         // strip trailing (
@@ -1290,7 +1447,7 @@ class Parser {
 
     /**
      * Check for dict:  "{" <name>: <value>, <name>: <value> "}"
-     * @return object Returns null if nothing was found
+     * @return object Returns an object of type 'dict', or null if nothing was found
      */
     private function factor_dict() {
         if (substr($this->input, $this->index, 1) != '{')   return null;
@@ -1307,7 +1464,7 @@ class Parser {
     
     /**
      * Check for array:  "[" <expression> [,<expression> ...] "]"
-     * @return object Returns null if nothing was found
+     * @return object Returns an object of type 'array', or null if nothing was found
      */
     private function factor_array() {
         if (substr($this->input, $this->index, 1) != '[')   return null;
@@ -1326,7 +1483,7 @@ class Parser {
      * Read a list of expressions, index must point to first char after (
      * @param string $end Which char to use as terminator
      * @param bool $dict True to read a dictionary
-     * @return array<object>
+     * @return array<object> Returns an array of objects, or null if nothing was found
      */
     private function factor_exprlist($end = ')', $dict = false) {
         $argv = [];
@@ -1348,7 +1505,7 @@ class Parser {
                         $key = $key->value;
                 } else {
                     // key is a number or a name
-                    $key = $this->regExp("/^[a-zA-Z_0-9]*/");
+                    $key = $this->regExp($this->regexp_name);
                     if (!$key) { // not a name, try a number
                         $key = $this->factor_num();
                         if ($key)   $key = $key->value;
